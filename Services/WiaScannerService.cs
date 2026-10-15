@@ -13,6 +13,8 @@ public sealed class WiaScannerService
     private const int CurrentIntent = 6146;
     private const int XResolution = 6147;
     private const int YResolution = 6148;
+    private const int XPosition = 6149;
+    private const int YPosition = 6150;
     private const int XExtent = 6151;
     private const int YExtent = 6152;
     private const int IntentColor = 1;
@@ -89,11 +91,25 @@ public sealed class WiaScannerService
             device = selectedInfo.Connect();
             TrySetProperty(device.Properties, DocumentHandlingSelect, Flatbed);
             item = device.Items[1];
+            TrySetProperty(item.Properties, CurrentIntent, IntentColor);
             TrySetProperty(item.Properties, XResolution, 300);
             TrySetProperty(item.Properties, YResolution, 300);
+            var xOriginApplied = TrySetProperty(item.Properties, XPosition, 0, requireExact: true);
+            var yOriginApplied = TrySetProperty(item.Properties, YPosition, 0, requireExact: true);
+            var originApplied = xOriginApplied && yOriginApplied;
 
-            bool supportsLegal = CanUseScanArea(item.Properties, "Legal", 300);
-            bool supportsA3 = CanUseScanArea(item.Properties, "A3", 300);
+            var actualXResolution = ReadIntProperty(item.Properties, XResolution) ?? 300;
+            var actualYResolution = ReadIntProperty(item.Properties, YResolution) ?? 300;
+            bool supportsLegal = originApplied && CanUseScanArea(
+                item.Properties,
+                "Legal",
+                actualXResolution,
+                actualYResolution);
+            bool supportsA3 = originApplied && CanUseScanArea(
+                item.Properties,
+                "A3",
+                actualXResolution,
+                actualYResolution);
             return (supportsA3, supportsLegal);
         }
         catch
@@ -156,19 +172,31 @@ public sealed class WiaScannerService
                 options.Source == ScanSource.AutomaticDocumentFeeder ? Feeder : Flatbed);
 
             item = device.Items[1];
+            TrySetProperty(item.Properties, CurrentIntent, IntentFor(options.ColorMode));
             TrySetProperty(item.Properties, XResolution, options.Dpi);
             TrySetProperty(item.Properties, YResolution, options.Dpi);
-            TrySetProperty(item.Properties, CurrentIntent, IntentFor(options.ColorMode));
+            var xOriginApplied = TrySetProperty(item.Properties, XPosition, 0, requireExact: true);
+            var yOriginApplied = TrySetProperty(item.Properties, YPosition, 0, requireExact: true);
+            var originApplied = xOriginApplied && yOriginApplied;
 
             var (widthInches, heightInches) = PaperDimensions(options.PaperSize);
-            var widthApplied = TrySetProperty(
-                item.Properties, XExtent, (int)Math.Round(widthInches * options.Dpi));
-            var heightApplied = TrySetProperty(
-                item.Properties, YExtent, (int)Math.Round(heightInches * options.Dpi));
-            if (options.PaperSize is "A3" or "Legal" && (!widthApplied || !heightApplied))
+            var actualXResolution = ReadIntProperty(item.Properties, XResolution) ?? options.Dpi;
+            var actualYResolution = ReadIntProperty(item.Properties, YResolution) ?? options.Dpi;
+            var widthApplied = TrySetExtent(
+                item.Properties,
+                XExtent,
+                (int)Math.Round(widthInches * actualXResolution));
+            var heightApplied = TrySetExtent(
+                item.Properties,
+                YExtent,
+                (int)Math.Round(heightInches * actualYResolution));
+            if (!originApplied || !widthApplied || !heightApplied)
             {
-                throw new InvalidOperationException(
-                    "A3 or Legal is not available on this Printer Model");
+                var message = options.PaperSize is "A3" or "Legal"
+                    ? "A3 or Legal is not available on this Printer Model"
+                    : $"The scanner driver could not apply the full {options.PaperSize} scan area. " +
+                      "Try a lower resolution or update the scanner driver.";
+                throw new InvalidOperationException(message);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -238,11 +266,56 @@ public sealed class WiaScannerService
         _ => (8.2677, 11.6929)
     };
 
-    private static bool CanUseScanArea(dynamic properties, string paperSize, int dpi)
+    private static bool CanUseScanArea(
+        dynamic properties,
+        string paperSize,
+        int xResolution,
+        int yResolution)
     {
         var (widthInches, heightInches) = PaperDimensions(paperSize);
-        return TrySetProperty(properties, XExtent, (int)Math.Round(widthInches * dpi)) &&
-               TrySetProperty(properties, YExtent, (int)Math.Round(heightInches * dpi));
+        return TrySetExtent(properties, XExtent, (int)Math.Round(widthInches * xResolution)) &&
+               TrySetExtent(properties, YExtent, (int)Math.Round(heightInches * yResolution));
+    }
+
+    private static int? ReadIntProperty(dynamic properties, int propertyId)
+    {
+        foreach (dynamic property in properties)
+        {
+            try
+            {
+                if ((int)property.PropertyID == propertyId)
+                {
+                    return Convert.ToInt32(property.Value);
+                }
+            }
+            catch (Exception exception) when (
+                exception is COMException or ArgumentException or InvalidCastException or FormatException)
+            {
+                return null;
+            }
+            finally
+            {
+                ReleaseCom(property);
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TrySetExtent(dynamic properties, int propertyId, int requestedValue)
+    {
+        // Some drivers advertise a bed that is one or two pixels shorter than the
+        // mathematical paper size. Retrying within that tolerance avoids falling
+        // back to the driver's smaller default rectangle.
+        for (var adjustment = 0; adjustment <= 2; adjustment++)
+        {
+            if (TrySetProperty(properties, propertyId, Math.Max(1, requestedValue - adjustment)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string? ReadProperty(dynamic properties, int propertyId, string propertyName)
@@ -266,7 +339,11 @@ public sealed class WiaScannerService
         return null;
     }
 
-    private static bool TrySetProperty(dynamic properties, int propertyId, int value)
+    private static bool TrySetProperty(
+        dynamic properties,
+        int propertyId,
+        int value,
+        bool requireExact = false)
     {
         foreach (dynamic property in properties)
         {
@@ -280,7 +357,8 @@ public sealed class WiaScannerService
                 try
                 {
                     property.Value = value;
-                    return Convert.ToInt32(property.Value) >= value;
+                    var appliedValue = Convert.ToInt32(property.Value);
+                    return requireExact ? appliedValue == value : appliedValue >= value;
                 }
                 catch (Exception exception) when (
                     exception is COMException or ArgumentException or InvalidCastException)

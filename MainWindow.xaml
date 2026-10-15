@@ -298,6 +298,11 @@
                         <Button x:Name="ZoomFitButton" Content="Fit" Height="28" Padding="9,0" Margin="6,0,8,0"
                                 Style="{StaticResource SecondaryButtonStyle}" Click="ZoomFitButton_Click"
                                 ToolTip="Fit the page to the preview" />
+                        <Button x:Name="OpenSavedFilesButton" Content="Open Saved Files" Height="28"
+                                Padding="9,0" Margin="0,0,8,0"
+                                Style="{StaticResource SecondaryButtonStyle}"
+                                Click="OpenSavedFilesButton_Click"
+                                ToolTip="Open the automatic JPG save folder" />
                         <Border Background="{DynamicResource PreviewBackgroundBrush}"
                                 CornerRadius="5" Padding="9,4" VerticalAlignment="Center">
                             <TextBlock x:Name="PageCounterText" Text="No pages" Foreground="{DynamicResource MutedTextBrush}" />

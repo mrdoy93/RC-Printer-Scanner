@@ -11,6 +11,8 @@ A compact Windows desktop application for Epson and Brother printers and scanner
 - Detects every paper size reported by the selected printer, including driver-defined custom sizes and dimensions
 - 150, 200, 300, and 600 DPI scanning, with 300 DPI selected by default
 - Automatic document-background cleanup and local text contrast enhancement for True Gray, Gray Error Diffusion, and Black & White scans
+- Full-size scans that preserve page content while cleaning dark sides and corners connected to the outer edge
+- Full selected scan area is acquired consistently before True Gray, Black & White, or Error Diffusion processing
 - Color, True Gray, Gray (Error Diffusion), and Black & White modes, with Color selected by default
 - Continuous multipage scanning with preview, zoom, scrolling, manual full-resolution crop, whole-page rotation, delete, and rescan controls
 - Live document page count in the footer
@@ -20,7 +22,7 @@ A compact Windows desktop application for Epson and Brother printers and scanner
 - ZIP output containing one compressed PDF for each scanned page
 - Combined PDF and individual-PDF ZIP actions always ask for a destination and filename before saving
 - Automatic portrait or landscape PDF pages so rotated scans fill the largest possible page area
-- Remembered save location with an in-app **Browse** button
+- Remembered save location with an in-app **Browse** button and an **Open Saved Files** preview shortcut
 - Every completed scan automatically saves a JPEG copy to that folder, with Windows Pictures as the default
 - Native Epson/Brother printer properties
 - Scan and print settings close when the user clicks outside or activates another application

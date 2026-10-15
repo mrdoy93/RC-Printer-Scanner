@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Printing;
 using System.Runtime.InteropServices;
@@ -182,7 +183,16 @@ public partial class MainWindow : Window
         try
         {
             var progress = new Progress<int>(UpdateScannerAcquisitionProgress);
-            await _scannerService.ScanAsync(scanner, options, rawPath, progress, cancellation.Token);
+            // Acquire one consistent full-color page from WIA. Grayscale, black-and-white,
+            // and error diffusion are applied after acquisition so driver intent changes
+            // cannot reset or shrink the selected scan area.
+            var acquisitionOptions = options with { ColorMode = ScanColorMode.Color };
+            await _scannerService.ScanAsync(
+                scanner,
+                acquisitionOptions,
+                rawPath,
+                progress,
+                cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             SetScanProgress(true, 82, "Processing the scanned image…");
             SetStatus("Optimizing scanned page…", StatusKind.Working);
@@ -1611,6 +1621,26 @@ public partial class MainWindow : Window
         {
             RememberSaveFolder(dialog.SelectedPath);
             SetStatus("Save location updated", StatusKind.Success);
+        }
+    }
+
+    private void OpenSavedFilesButton_Click(object sender, RoutedEventArgs e)
+    {
+        var folder = GetSaveFolder();
+        try
+        {
+            Directory.CreateDirectory(folder);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = folder,
+                UseShellExecute = true
+            });
+            SetStatus("Opened saved files folder", StatusKind.Success);
+        }
+        catch (Exception exception)
+        {
+            SetStatus("Saved files folder could not be opened", StatusKind.Error);
+            ShowError(exception.Message);
         }
     }
 

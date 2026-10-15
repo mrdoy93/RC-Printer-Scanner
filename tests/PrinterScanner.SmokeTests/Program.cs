@@ -299,8 +299,11 @@ internal static class Program
             imageService.ProcessScan(sourcePath, outputPath, mode);
             using var output = new Bitmap(outputPath);
 
-            Require(output.GetPixel(20, 25).R >= 240 && output.GetPixel(295, 25).R >= 240,
-                $"{mode} did not clean the shaded page background.");
+            var leftBackground = output.GetPixel(20, 25).R;
+            var rightBackground = output.GetPixel(295, 25).R;
+            Require(leftBackground >= 240 && rightBackground >= 240,
+                $"{mode} did not clean the shaded page background " +
+                $"(left {leftBackground}, right {rightBackground}).");
             Require(output.GetPixel(160, 70).R <= 80,
                 $"{mode} did not preserve strong document text.");
             Require(output.GetPixel(160, 104).R <= 210,
@@ -382,8 +385,8 @@ internal static class Program
             Require(cardBackground - faintCardText >= 55,
                 $"{mode} did not make low-contrast card text readable " +
                 $"(background {cardBackground:0.0}, faint text {faintCardText:0.0}).");
-            Require(outsideArtifact >= 250,
-                $"{mode} did not whiten artifacts outside the detected card " +
+            Require(outsideArtifact <= 120,
+                $"{mode} removed full-page content outside the detected card " +
                 $"({outsideArtifact:0.0}).");
             Require(output.Width == 360 && output.Height == 260,
                 $"{mode} changed the original paper dimensions.");
@@ -427,8 +430,8 @@ internal static class Program
             var outsideCorner = AverageBrightness(output, new Rectangle(68, 62, 12, 12));
             var retainedText = AverageBrightness(output, new Rectangle(145, 132, 80, 8));
 
-            Require(outsideCorner >= 250,
-                $"{mode} did not keep the cropped corner outside a tilted object white " +
+            Require(outsideCorner <= 120,
+                $"{mode} removed full-page content outside a tilted detected object " +
                 $"({outsideCorner:0.0}).");
             var maximumRetainedDetail = mode == ScanColorMode.Color ? 40 : 90;
             Require(retainedText <= maximumRetainedDetail,
@@ -436,6 +439,39 @@ internal static class Program
                 $"({retainedText:0.0}).");
             Require(output.Width == 380 && output.Height == 280,
                 $"{mode} changed the tilted scan's paper dimensions.");
+        }
+
+        var missedObjectPath = Path.Combine(testFolder, "missed-object-with-dark-edges.png");
+        using (var source = new Bitmap(420, 300, PixelFormat.Format24bppRgb))
+        {
+            source.SetResolution(200, 200);
+            using var graphics = Graphics.FromImage(source);
+            graphics.Clear(Color.FromArgb(238, 238, 238));
+            using var edgeBrush = new SolidBrush(Color.FromArgb(35, 35, 35));
+            using var contentBrush = new SolidBrush(Color.FromArgb(20, 60, 180));
+            graphics.FillRectangle(edgeBrush, 0, 0, 14, source.Height);
+            graphics.FillRectangle(edgeBrush, source.Width - 11, 70, 11, 170);
+            graphics.FillRectangle(edgeBrush, source.Width - 24, 0, 24, 19);
+            graphics.FillRectangle(edgeBrush, 0, source.Height - 17, 22, 17);
+            graphics.FillRectangle(contentBrush, 190, 142, 38, 10);
+            source.Save(missedObjectPath, ImageFormat.Png);
+        }
+
+        foreach (var mode in Enum.GetValues<ScanColorMode>())
+        {
+            var outputPath = Path.Combine(testFolder, $"missed-object-{mode}.png");
+            imageService.ProcessScan(missedObjectPath, outputPath, mode);
+            using var output = new Bitmap(outputPath);
+
+            Require(output.Width == 420 && output.Height == 300,
+                $"{mode} did not retain the full selected scan size when object detection failed.");
+            Require(AverageBrightness(output, new Rectangle(0, 80, 10, 120)) >= 250 &&
+                    AverageBrightness(output, new Rectangle(410, 90, 10, 120)) >= 250 &&
+                    AverageBrightness(output, new Rectangle(398, 0, 22, 16)) >= 250 &&
+                    AverageBrightness(output, new Rectangle(0, 284, 20, 16)) >= 250,
+                $"{mode} left a dark side or corner in the full-scan fallback.");
+            Require(AverageBrightness(output, new Rectangle(195, 144, 28, 6)) <= 100,
+                $"{mode} removed interior content while cleaning fallback scan edges.");
         }
     }
 

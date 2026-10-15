@@ -73,27 +73,26 @@ public sealed class ImageService
         {
             case ScanColorMode.Color:
                 var colorLuminance = ReadLuminance(working);
-                var colorMask = DetectDominantObject(
+                var colorDpi = Math.Max(96f, working.HorizontalResolution);
+                var colorCleanupMask = DetectEdgeCleanupMask(
                     colorLuminance,
                     working.Width,
                     working.Height,
-                    Math.Max(96f, working.HorizontalResolution));
-                ApplyWhiteBackground(working, colorMask);
+                    colorDpi);
+                ApplyWhiteBackground(working, colorCleanupMask);
                 working.Save(destinationPath, ImageFormat.Png);
                 break;
             case ScanColorMode.TrueGray:
                 var grayscale = EnhanceDocumentLuminance(
                     working,
-                    detailStrength: 2,
-                    out _);
+                    detailStrength: 2);
                 WriteGrayscaleInPlace(working, grayscale);
                 working.Save(destinationPath, ImageFormat.Png);
                 break;
             case ScanColorMode.BlackAndWhite:
                 using (var blackAndWhite = ToOneBit(
                            working,
-                           useErrorDiffusion: false,
-                           out _))
+                           useErrorDiffusion: false))
                 {
                     blackAndWhite.Save(destinationPath, ImageFormat.Png);
                 }
@@ -101,8 +100,7 @@ public sealed class ImageService
             case ScanColorMode.GrayErrorDiffusion:
                 using (var diffused = ToOneBit(
                            working,
-                           useErrorDiffusion: true,
-                           out _))
+                           useErrorDiffusion: true))
                 {
                     diffused.Save(destinationPath, ImageFormat.Png);
                 }
@@ -187,16 +185,21 @@ public sealed class ImageService
 
     private static byte[] EnhanceDocumentLuminance(
         Bitmap bitmap,
-        int detailStrength,
-        out Rectangle? subjectBounds)
+        int detailStrength)
     {
         var luminance = ReadLuminance(bitmap);
 
         var dpi = Math.Max(96f, bitmap.HorizontalResolution);
         var objectMask = DetectDominantObject(luminance, bitmap.Width, bitmap.Height, dpi);
-        subjectBounds = FindMaskBounds(objectMask, bitmap.Width, bitmap.Height);
-        NormalizeLevels(luminance, objectMask);
-        ApplyWhiteBackground(luminance, objectMask);
+        var edgeCleanupMask = DetectEdgeCleanupMask(
+            luminance,
+            bitmap.Width,
+            bitmap.Height,
+            dpi);
+        // Object detection may tune the tones, but it must never erase or crop
+        // other content inside the user-selected page area.
+        NormalizeLevels(luminance, objectMask ?? edgeCleanupMask, objectMask is not null);
+        ApplyWhiteBackground(luminance, edgeCleanupMask);
         var windowSize = Math.Clamp((int)Math.Round(dpi / 4f), 31, 121) | 1;
         var enhanced = ApplyReferenceDocumentTone(
             luminance,
@@ -205,7 +208,7 @@ public sealed class ImageService
             windowSize,
             detailStrength,
             shadowLift: objectMask is null ? 24 : 240);
-        ApplyWhiteBackground(enhanced, objectMask);
+        ApplyWhiteBackground(enhanced, edgeCleanupMask);
         return enhanced;
     }
 
@@ -444,6 +447,108 @@ public sealed class ImageService
         return mask;
     }
 
+    private static bool[]? DetectEdgeCleanupMask(
+        byte[] luminance,
+        int width,
+        int height,
+        float dpi)
+    {
+        if (width < 3 || height < 3)
+        {
+            return null;
+        }
+
+        // When no document object can be isolated, retain the selected full scan
+        // area but remove dark scanner-bed shadows connected to its outer edge.
+        var shortestSide = Math.Min(width, height);
+        var maximumDepth = Math.Clamp(
+            (int)Math.Round(dpi * 0.12f),
+            8,
+            Math.Max(8, Math.Min(64, shortestSide / 6)));
+        var seedDepth = Math.Clamp((int)Math.Round(dpi * 0.02f), 2, 8);
+        var artifact = new bool[luminance.Length];
+        var queue = new Queue<int>();
+        var removedPixels = 0;
+
+        bool IsInEdgeBand(int x, int y) =>
+            x < maximumDepth || y < maximumDepth ||
+            x >= width - maximumDepth || y >= height - maximumDepth;
+
+        void AddSeed(int x, int y)
+        {
+            var index = (y * width) + x;
+            if (!artifact[index] && luminance[index] <= 205)
+            {
+                artifact[index] = true;
+                removedPixels++;
+                queue.Enqueue(index);
+            }
+        }
+
+        for (var inset = 0; inset < seedDepth; inset++)
+        {
+            var bottom = height - 1 - inset;
+            var right = width - 1 - inset;
+            for (var x = inset; x <= right; x++)
+            {
+                AddSeed(x, inset);
+                AddSeed(x, bottom);
+            }
+
+            for (var y = inset + 1; y < bottom; y++)
+            {
+                AddSeed(inset, y);
+                AddSeed(right, y);
+            }
+        }
+
+        if (queue.Count == 0)
+        {
+            return null;
+        }
+
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            var x = current % width;
+            var y = current / width;
+            for (var offsetY = -1; offsetY <= 1; offsetY++)
+            {
+                for (var offsetX = -1; offsetX <= 1; offsetX++)
+                {
+                    if (offsetX == 0 && offsetY == 0)
+                    {
+                        continue;
+                    }
+
+                    var neighborX = x + offsetX;
+                    var neighborY = y + offsetY;
+                    if (neighborX < 0 || neighborX >= width ||
+                        neighborY < 0 || neighborY >= height ||
+                        !IsInEdgeBand(neighborX, neighborY))
+                    {
+                        continue;
+                    }
+
+                    var neighbor = (neighborY * width) + neighborX;
+                    if (!artifact[neighbor] && luminance[neighbor] <= 225)
+                    {
+                        artifact[neighbor] = true;
+                        removedPixels++;
+                        queue.Enqueue(neighbor);
+                    }
+                }
+            }
+        }
+
+        for (var index = 0; index < artifact.Length; index++)
+        {
+            artifact[index] = !artifact[index];
+        }
+
+        return removedPixels == 0 ? null : artifact;
+    }
+
     private static List<Point> ConvexHull(List<Point> points)
     {
         var ordered = points
@@ -491,7 +596,10 @@ public sealed class ImageService
         ((long)first.X - origin.X) * (second.Y - origin.Y) -
         ((long)first.Y - origin.Y) * (second.X - origin.X);
 
-    private static void NormalizeLevels(byte[] luminance, bool[]? mask)
+    private static void NormalizeLevels(
+        byte[] luminance,
+        bool[]? mask,
+        bool hasDetectedObject)
     {
         var histogram = new int[256];
         var sampleCount = 0;
@@ -514,7 +622,7 @@ public sealed class ImageService
         var darkPoint = Percentile(histogram, sampleCount, 0.02);
         var measuredLightPoint = Percentile(histogram, sampleCount, 0.90);
         var objectBodyPoint = Percentile(histogram, sampleCount, 0.70);
-        var darkDetectedObject = mask is not null && objectBodyPoint < 120;
+        var darkDetectedObject = hasDetectedObject && objectBodyPoint < 120;
         var lightPoint = darkDetectedObject
             ? objectBodyPoint
             : Math.Max(180, measuredLightPoint);
@@ -534,7 +642,7 @@ public sealed class ImageService
             var normalized = darkDetectedObject
                 ? 20 + Math.Clamp((luminance[index] - darkPoint) * 210 / range, 0, 210)
                 : Math.Clamp((luminance[index] - darkPoint) * 255 / range, 0, 255);
-            var whiteSnapThreshold = mask is null ? 232 : 250;
+            var whiteSnapThreshold = hasDetectedObject ? 250 : 232;
             luminance[index] = (byte)(normalized >= whiteSnapThreshold ? 255 : normalized);
         }
     }
@@ -594,59 +702,6 @@ public sealed class ImageService
             bitmap.UnlockBits(data);
             ArrayPool<byte>.Shared.Return(pixels);
         }
-    }
-
-    private static Rectangle? FindMaskBounds(bool[]? mask, int width, int height)
-    {
-        if (mask is null)
-        {
-            return null;
-        }
-
-        var left = width;
-        var top = height;
-        var right = -1;
-        var bottom = -1;
-        for (var y = 0; y < height; y++)
-        {
-            var row = y * width;
-            for (var x = 0; x < width; x++)
-            {
-                if (!mask[row + x])
-                {
-                    continue;
-                }
-
-                left = Math.Min(left, x);
-                top = Math.Min(top, y);
-                right = Math.Max(right, x);
-                bottom = Math.Max(bottom, y);
-            }
-        }
-
-        return right >= left && bottom >= top
-            ? new Rectangle(left, top, right - left + 1, bottom - top + 1)
-            : null;
-    }
-
-    private static void SaveProcessedBitmap(
-        Bitmap bitmap,
-        string destinationPath,
-        Rectangle? subjectBounds)
-    {
-        if (subjectBounds is null ||
-            subjectBounds.Value.Width == bitmap.Width &&
-            subjectBounds.Value.Height == bitmap.Height)
-        {
-            bitmap.Save(destinationPath, ImageFormat.Png);
-            return;
-        }
-
-        using var cropped = bitmap.Clone(subjectBounds.Value, bitmap.PixelFormat);
-        cropped.SetResolution(
-            Math.Max(96, bitmap.HorizontalResolution),
-            Math.Max(96, bitmap.VerticalResolution));
-        cropped.Save(destinationPath, ImageFormat.Png);
     }
 
     private static int Percentile(int[] histogram, int total, double percentile)
@@ -793,8 +848,7 @@ public sealed class ImageService
 
     private static Bitmap ToOneBit(
         Bitmap source,
-        bool useErrorDiffusion,
-        out Rectangle? subjectBounds)
+        bool useErrorDiffusion)
     {
         var sourceRect = new Rectangle(0, 0, source.Width, source.Height);
         var output = new Bitmap(source.Width, source.Height, DrawingPixelFormat.Format1bppIndexed);
@@ -807,8 +861,7 @@ public sealed class ImageService
             var result = new byte[outputStride * source.Height];
             var input = EnhanceDocumentLuminance(
                 source,
-                detailStrength: useErrorDiffusion ? 3 : 3,
-                out subjectBounds);
+                detailStrength: useErrorDiffusion ? 3 : 3);
 
             var currentErrors = new float[source.Width + 2];
             var nextErrors = new float[source.Width + 2];
